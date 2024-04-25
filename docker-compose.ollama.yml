@@ -1,0 +1,123 @@
+version: "3.8"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: always
+    ports:
+      - 11434:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    volumes:
+      - ./open-webui:/app/backend/data
+    depends_on:
+      - ollama
+    ports:
+      - 4060:8080
+    environment:
+      - 'OLLAMA_BASE_URL=http://ollama:11434'
+      - 'WEBUI_SECRET_KEY='
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped
+
+
+  frontend:
+    image: quivr-frontend-prebuilt
+    pull_policy: never
+    container_name: web
+    depends_on:
+      - backend-core
+      - ollama
+    restart: always
+    ports:
+      - 3000:3000
+
+  backend-core:
+    image: stangirard/quivr-backend-prebuilt:latest
+    pull_policy: if_not_present
+    env_file:
+      - .env
+    container_name: backend-core
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: [ "CMD", "curl", "http://localhost:5050/healthz" ]
+    command:
+      - "uvicorn"
+      - "main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "5050"
+      - "--workers"
+      - "6"
+    restart: always
+    volumes:
+      - ./backend/:/code/
+    ports:
+      - 5050:5050
+
+  redis:
+    image: redis:latest@sha256:a7cee7c8178ff9b5297cb109e6240f5072cdaaafd775ce6b586c3c704b06458e
+    container_name: redis
+    restart: always
+    ports:
+      - 6379:6379
+
+  worker:
+    pull_policy: if_not_present
+    image: stangirard/quivr-backend-prebuilt:latest
+    env_file:
+      - .env
+    container_name: worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: celery -A celery_worker worker -l info
+    restart: always
+    depends_on:
+      - redis
+
+  beat:
+    image: stangirard/quivr-backend-prebuilt:latest
+    pull_policy: if_not_present
+    env_file:
+      - .env
+    container_name: beat
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: celery -A celery_worker beat -l info
+    restart: always
+    depends_on:
+      - redis
+
+  flower:
+    image: stangirard/quivr-backend-prebuilt:latest
+    pull_policy: if_not_present
+    env_file:
+      - .env
+    container_name: flower
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: celery -A celery_worker flower -l info --port=5555
+    restart: always
+    depends_on:
+      - redis
+      - worker
+      - beat
+    ports:
+      - 5555:5555
+
+networks:
+  quivr-network:
+    driver: bridge
